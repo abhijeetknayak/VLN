@@ -5,10 +5,10 @@ set -euo pipefail
 # Single-node configuration
 # ----------------------------
 # Number of GPUs to use (1 or 2)
-NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
 
 # Restrict to exactly 4 local GPUs (optional but recommended)
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 # Optional GPU visibility
 # export CUDA_VISIBLE_DEVICES="0,1"
