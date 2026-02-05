@@ -17,6 +17,7 @@ import transformers
 from PIL import Image
 from torch.utils.data import Dataset
 from transformers.image_utils import to_numpy_array
+# from easy_dict import EasyDict as edict
 
 
 import sys
@@ -360,12 +361,11 @@ def get_annotations_from_lmdb(data_path, setting):
 class System2PixelGoalDataset(Dataset):
     def __init__(self, data_args):
         super(System2PixelGoalDataset, self).__init__()
-        dataset = data_args["vln_dataset_use"].split(",")
+        dataset = data_args.vln_dataset_use.split(",")
         dataset_list = data_list(dataset)
         rank0_print(f"Loading datasets: {dataset_list}")
 
-        self.sample_step = data_args["sample_step"]
-
+        self.sample_step = data_args.sample_step
         self.list_data_dict = []
 
         for data in dataset_list:
@@ -439,7 +439,7 @@ class System2PixelGoalDataset(Dataset):
 
             self.list_data_dict.extend(list_data_dict)
 
-        self.num_history = data_args["num_history"]
+        self.num_history = data_args.num_history
         self.idx2actions = {0: 'STOP', 1: "↑", 2: "←", 3: "→", 5: "↓"}
         self.conjunctions = [
             'you can see ',
@@ -499,13 +499,15 @@ class System2PixelGoalDataset(Dataset):
                 lookdown_image = Image.open(io.BytesIO(lookdown_image_data)).convert('RGB')
 
                 if id in history_id or id == start_frame_id:
-                    image = image.resize((self.data_args['resize_w'], self.data_args['resize_h']))
+                    image = image.resize((self.data_args.resize_w, self.data_args.resize_h))
                     images.append(image)
                     if id == start_frame_id and pose is not None:
                         images.append(lookdown_image)
  
 
         data_dict["images"] = images
+        data_dict["action"] = action
+        data_dict["instruction"] = instruction
 
         return data_dict
 
@@ -544,21 +546,24 @@ class System2PixelGoalDataset(Dataset):
                     images.append(lookdown_image)
         
         data_dict["images"] = images
-
+        data_dict["action"] = action
+        data_dict["instruction"] = instruction
+        
         return data_dict
 
 
 
 if __name__ == "__main__":
-    data_args = {
-        "vln_dataset_use": "r2r_125cm_0_30%30",
-        "sample_step": 1,
-        "num_history": 8,
-        "resize_w": 384,    
-        "resize_h": 384,
-    }
-    dataset = System2PixelGoalDataset(data_args=data_args)
+    pass
+    # data_args = {
+    #     "vln_dataset_use": "r2r_125cm_0_30%30",
+    #     "sample_step": 1,
+    #     "num_history": 8,
+    #     "resize_w": 384,    
+    #     "resize_h": 384,
+    # }
+    # dataset = System2PixelGoalDataset(data_args=edict(data_args))
 
-    for i in range(len(dataset)):
-        data = dataset[i]
-        print(i, data['images'][-1].size)    
+    # for i in range(len(dataset)):
+    #     data = dataset[i]
+    #     print(i, data['images'][-1].size)    
