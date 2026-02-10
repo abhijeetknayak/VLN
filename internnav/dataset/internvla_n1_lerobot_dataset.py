@@ -26,6 +26,8 @@ from .vlln_lerobot_dataset import VLLNDataset
 import sys
 import pdb
 
+from vggt_slam.frame_overlap import FrameTracker
+
 
 
 lmdb_training = True
@@ -1111,7 +1113,7 @@ class NavPixelGoalDataset(Dataset):
         env = lmdb.open(obs_lmdb_path, subdir=False, readonly=True, lock=False)
 
         with env.begin() as txn:
-            for id in range(0, start_frame_id):
+            for id in range(0, start_frame_id + 1):
                 image_file = os.path.join(video, f"observation.images.rgb.{height}cm_{pitch_1}deg", f"episode_{ep_id:06d}_{id}.jpg")
                 image_names.append(image_file)
 
@@ -1120,23 +1122,20 @@ class NavPixelGoalDataset(Dataset):
                 image = Image.open(io.BytesIO(image_data)).convert('RGB')
                 imgs.append(image)
 
-        solver = Solver(
-            init_conf_threshold=25.0,
-            use_point_map=False,
-            use_sim3=False,
-            gradio_mode=False,
-            vis_stride = 1,
-            vis_point_size = 0.003)
+        flow_tracker = FrameTracker()
 
         history_ids = []
         history_images = []
 
         # history images are in order 
-        for i in range(len(imgs)):
-            enough_disparity = solver.flow_tracker.compute_disparity(imgs[i], min_disparity=50.0, vis_flow=False)
+        for i in range(len(imgs) - 1):
+            enough_disparity = flow_tracker.compute_disparity(np.array(imgs[i]), min_disparity=50.0, visualize=False)
             if enough_disparity:
                 history_ids.append(i)
                 history_images.append(imgs[i])
+        
+        history_ids.append(len(imgs) - 1)
+        history_images.append(imgs[-1])
         
         return history_ids, history_images
         
@@ -1157,9 +1156,13 @@ class NavPixelGoalDataset(Dataset):
             pose,
         ) = self.list_data_dict[i]
         if start_frame_id != 0:
-            history_id = np.unique(np.linspace(0, start_frame_id - 1, self.num_history, dtype=np.int32)).tolist()
+            history_id, history_images = self.get_history(data_path, video, height, pitch_1, pitch_2, ep_id, start_frame_id)
+            # history_id = np.unique(np.linspace(0, start_frame_id - 1, self.num_history, dtype=np.int32)).tolist()
         else:
             history_id = []
+            history_images = []
+
+        breakpoint()
 
         images = []
         grid_thws = []
@@ -1173,10 +1176,6 @@ class NavPixelGoalDataset(Dataset):
             for id in range(0, end_frame_id):
                 image_file = os.path.join(video, f"observation.images.rgb.{height}cm_{pitch_1}deg", f"episode_{ep_id:06d}_{id}.jpg")
 
-                # Get image from lmdb
-                image_data = txn.get(image_file.encode('utf-8'))
-                image = Image.open(io.BytesIO(image_data)).convert('RGB')
-
                 lookdown_image_key = image_file.replace(f'_{pitch_1}deg', f'_{pitch_2}deg')
                 lookdown_image_data = txn.get(lookdown_image_key.encode('utf-8'))
                 lookdown_image = Image.open(io.BytesIO(lookdown_image_data)).convert('RGB')
@@ -1189,10 +1188,10 @@ class NavPixelGoalDataset(Dataset):
                     depth_image, do_depth_scale=True, depth_scale=1000, target_height=224, target_width=224
                 )
                 depth_image = torch.as_tensor(np.ascontiguousarray(depth_image)).float()  # [H, W]
-                if id in history_id or id == start_frame_id:
+                if id in history_id:
                     if self.data_args.transform_train is not None:
-                        image = self.data_args.transform_train(image)
-                    image, grid_thw = self.process_image_unified(image)
+                        im = self.data_args.transform_train(history_images[history_id.index(id)])
+                    image, grid_thw = self.process_image_unified(im)
                     images.append(image)
                     grid_thws.append(grid_thw)
                     if id == start_frame_id and pose is not None:
