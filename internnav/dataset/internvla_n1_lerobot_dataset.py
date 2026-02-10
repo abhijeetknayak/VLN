@@ -1102,6 +1102,43 @@ class NavPixelGoalDataset(Dataset):
             return self.__getitem_lmdb__(i)
         else:
             return self.__getitem_lerobot__(i)
+
+    def get_history(self, data_path, video, height, pitch_1, pitch_2, ep_id, start_frame_id):
+        imgs = []
+        image_names = []
+
+        obs_lmdb_path = os.path.join(data_path, 'observations.lmdb')
+        env = lmdb.open(obs_lmdb_path, subdir=False, readonly=True, lock=False)
+
+        with env.begin() as txn:
+            for id in range(0, start_frame_id):
+                image_file = os.path.join(video, f"observation.images.rgb.{height}cm_{pitch_1}deg", f"episode_{ep_id:06d}_{id}.jpg")
+                image_names.append(image_file)
+
+                # Get image from lmdb
+                image_data = txn.get(image_file.encode('utf-8'))
+                image = Image.open(io.BytesIO(image_data)).convert('RGB')
+                imgs.append(image)
+
+        solver = Solver(
+            init_conf_threshold=25.0,
+            use_point_map=False,
+            use_sim3=False,
+            gradio_mode=False,
+            vis_stride = 1,
+            vis_point_size = 0.003)
+
+        history_ids = []
+        history_images = []
+
+        # history images are in order 
+        for i in range(len(imgs)):
+            enough_disparity = solver.flow_tracker.compute_disparity(imgs[i], min_disparity=50.0, vis_flow=False)
+            if enough_disparity:
+                history_ids.append(i)
+                history_images.append(imgs[i])
+        
+        return history_ids, history_images
         
 
     def __getitem_lmdb__(self, i):
