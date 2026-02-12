@@ -98,6 +98,6 @@ torchrun --standalone \
   --logging_steps 1 \
   --model_max_length 8192 \
   --gradient_checkpointing True \
-  --dataloader_num_workers 8 \
+  --dataloader_num_workers 0 \
   --run_name "${run_name}" \
   --report_to wandb

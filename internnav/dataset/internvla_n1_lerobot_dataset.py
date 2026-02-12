@@ -909,6 +909,7 @@ def get_annotations_from_lmdb(data_path, setting):
                         "length": ep_len,
                         f"poses_{setting}": ep_poses,
                         "pixel_goals": ep_pixel_goals,
+                        "parquet_key": parquet_key,
                     }
                     scene_annotations.append(episode)
         return scene_annotations        
@@ -969,6 +970,7 @@ class NavPixelGoalDataset(Dataset):
                 ep_id = item['id']
                 instruction = item['instructions']
                 video = item['video']
+                parquet_key = item['parquet_key']
                 actions = item['actions'][1:] + [0]
                 pixel_goals = item['pixel_goals']
                 poses = item[f'poses_{height}cm_{pitch_2}deg']
@@ -999,6 +1001,7 @@ class NavPixelGoalDataset(Dataset):
                                     ep_id,
                                     data_path,
                                     video,
+                                    parquet_key,
                                     height,
                                     pitch_1,
                                     pitch_2,
@@ -1019,6 +1022,7 @@ class NavPixelGoalDataset(Dataset):
                                 ep_id,
                                 data_path,
                                 video,
+                                parquet_key,
                                 height,
                                 pitch_1,
                                 pitch_2,
@@ -1034,6 +1038,7 @@ class NavPixelGoalDataset(Dataset):
                         ep_id,
                         data_path,
                         video,
+                        parquet_key,
                         height,
                         pitch_1,
                         pitch_2,
@@ -1105,6 +1110,65 @@ class NavPixelGoalDataset(Dataset):
         else:
             return self.__getitem_lerobot__(i)
 
+    def action_masking_adaptive(self, actions, target_kept=12, turn_to_fwd_ratio=0.4, min_fwd_threshold=3, max_fwd_threshold=25, min_turn_threshold=1, max_turn_threshold=8):
+        N = len(actions)
+        if N == 0:
+            return []
+
+        # base step: roughly "how many steps per kept frame"
+        steps_per_keep = max(1, N // max(1, target_kept))
+
+        # Derive thresholds
+        fwd_threshold = int(max(min_fwd_threshold,
+                                min(max_fwd_threshold, steps_per_keep)))
+
+        turn_threshold = int(max(min_turn_threshold,
+                                min(max_turn_threshold, math.ceil(steps_per_keep * turn_to_fwd_ratio))))
+
+        return action_masking(actions, fwd_threshold=fwd_threshold, turn_threshold=turn_threshold)
+
+    def action_based_history_selection(self, actions, fwd_threshold=8, turn_threshold=3):
+        total_actions = len(actions)
+        selected_indices = []
+        fwd_counter = 0
+        l_turn_counter = 0
+        r_turn_counter = 0
+
+        def clear_counters():
+            nonlocal fwd_counter, l_turn_counter, r_turn_counter
+            fwd_counter = 0
+            l_turn_counter = 0
+            r_turn_counter = 0
+
+        for idx in range(total_actions):
+            if actions[idx] == -1:  # first frame
+                selected_indices.append(idx)
+                clear_counters()
+            elif actions[idx] == 1:  # forward
+                fwd_counter += 1
+            elif actions[idx] == 2:  # left turn
+                l_turn_counter += 1
+                if r_turn_counter > 0:  # if we were previously counting right turns, reset that counter
+                    r_turn_counter -= 1
+            elif actions[idx] == 3:  # right turn
+                r_turn_counter += 1
+                if l_turn_counter > 0:  # if we were previously counting left turns, reset that counter
+                    l_turn_counter -= 1
+
+            # Masking logic:
+            if fwd_counter >= fwd_threshold:
+                selected_indices.append(idx)
+                clear_counters()  # reset after a forward run
+            
+            elif l_turn_counter >= turn_threshold:
+                selected_indices.append(idx)
+                clear_counters()  # reset after a turn run
+            
+            elif r_turn_counter >= turn_threshold:
+                selected_indices.append(idx)
+                clear_counters()  # reset after a turn run
+        return selected_indices
+
     def get_history(self, data_path, video, height, pitch_1, pitch_2, ep_id, start_frame_id):
         imgs = []
         image_names = []
@@ -1147,6 +1211,7 @@ class NavPixelGoalDataset(Dataset):
             ep_id,
             data_path,
             video,
+            parquet_key,
             height,
             pitch_1,
             pitch_2,
@@ -1155,12 +1220,24 @@ class NavPixelGoalDataset(Dataset):
             action,
             pose,
         ) = self.list_data_dict[i]
+
+        metadata_lmdb_path = os.path.join(data_path, 'metadata_parquet.lmdb')
+        meta_env = lmdb.open(metadata_lmdb_path, subdir=False, readonly=True, lock=False)
+
+        with meta_env.begin() as txn:
+            # Read actions from episode parquet
+            parquet_data = txn.get(parquet_key.encode('utf-8'))
+            parquet_data = pa.py_buffer(parquet_data)
+            table = pq.read_table(pa.BufferReader(parquet_data))
+            df = table.to_pandas()
+            episode_actions = df["action"].values
+
         if start_frame_id != 0:
-            history_id, history_images = self.get_history(data_path, video, height, pitch_1, pitch_2, ep_id, start_frame_id)
+            # history_id, history_images = self.get_history(data_path, video, height, pitch_1, pitch_2, ep_id, start_frame_id)
             # history_id = np.unique(np.linspace(0, start_frame_id - 1, self.num_history, dtype=np.int32)).tolist()
+            history_id = self.action_masking_adaptive(episode_actions[:start_frame_id])
         else:
             history_id = []
-            history_images = []
 
         breakpoint()
 
@@ -1176,6 +1253,9 @@ class NavPixelGoalDataset(Dataset):
             for id in range(0, end_frame_id):
                 image_file = os.path.join(video, f"observation.images.rgb.{height}cm_{pitch_1}deg", f"episode_{ep_id:06d}_{id}.jpg")
 
+                image_data = txn.get(image_file.encode('utf-8'))
+                image = Image.open(io.BytesIO(image_data)).convert('RGB')
+
                 lookdown_image_key = image_file.replace(f'_{pitch_1}deg', f'_{pitch_2}deg')
                 lookdown_image_data = txn.get(lookdown_image_key.encode('utf-8'))
                 lookdown_image = Image.open(io.BytesIO(lookdown_image_data)).convert('RGB')
@@ -1188,7 +1268,7 @@ class NavPixelGoalDataset(Dataset):
                     depth_image, do_depth_scale=True, depth_scale=1000, target_height=224, target_width=224
                 )
                 depth_image = torch.as_tensor(np.ascontiguousarray(depth_image)).float()  # [H, W]
-                if id in history_id:
+                if id in history_id or id == start_frame_id:
                     if self.data_args.transform_train is not None:
                         im = self.data_args.transform_train(history_images[history_id.index(id)])
                     image, grid_thw = self.process_image_unified(im)
