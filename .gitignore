@@ -149,6 +149,6 @@ logs/
 *.ckpt
 /results/
 checkpoints
-internnav/model/basemodel/LongCLIP/
+#internnav/model/basemodel/LongCLIP/
 .gradio/
 result/
