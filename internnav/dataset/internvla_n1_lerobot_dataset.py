@@ -27,7 +27,11 @@ import sys
 import pdb
 
 from vggt_slam.frame_overlap import FrameTracker
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+import math
 
 
 lmdb_training = True
@@ -68,6 +72,7 @@ VIDEOCHATGPT = {
 
 R2R_125CM_0_30 = {
     "data_path": "/hnvme/workspace/v106be14-nav_data/InternData-N1/vln_ce/lmdbs/r2r",
+    "data_path": "/e/scratch/m3/nav/InternData-N1/vln_ce/lmdbs/r2r",
     # "data_path": "/home/ikep64up/software/InternNav/data",
     "height": 125,
     "pitch_1": 0,
@@ -849,10 +854,6 @@ def get_annotations_from_lerobot_data(data_path, setting):
     return annotations
 
 def get_annotations_from_lmdb(data_path, setting):
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    import pyarrow as pa
-    import pyarrow.parquet as pq
 
     annotations = {
         "axis_align_matrix": [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
@@ -1133,7 +1134,7 @@ class NavPixelGoalDataset(Dataset):
         turn_threshold = int(max(min_turn_threshold,
                                 min(max_turn_threshold, math.ceil(steps_per_keep * turn_to_fwd_ratio))))
 
-        return action_masking(actions, fwd_threshold=fwd_threshold, turn_threshold=turn_threshold)
+        return self.action_based_history_selection(actions, fwd_threshold=fwd_threshold, turn_threshold=turn_threshold)
 
     def action_based_history_selection(self, actions, fwd_threshold=8, turn_threshold=3):
         total_actions = len(actions)
@@ -1235,19 +1236,19 @@ class NavPixelGoalDataset(Dataset):
         with meta_env.begin() as txn:
             # Read actions from episode parquet
             parquet_data = txn.get(parquet_key.encode('utf-8'))
+
             parquet_data = pa.py_buffer(parquet_data)
             table = pq.read_table(pa.BufferReader(parquet_data))
+
             df = table.to_pandas()
             episode_actions = df["action"].values
 
         if start_frame_id != 0:
             # history_id, history_images = self.get_history(data_path, video, height, pitch_1, pitch_2, ep_id, start_frame_id)
             # history_id = np.unique(np.linspace(0, start_frame_id - 1, self.num_history, dtype=np.int32)).tolist()
-            history_id = self.action_masking_adaptive(episode_actions[:start_frame_id])
+            history_id = self.action_based_history_selection(episode_actions[:start_frame_id])
         else:
             history_id = []
-
-        breakpoint()
 
         images = []
         grid_thws = []
@@ -1261,6 +1262,7 @@ class NavPixelGoalDataset(Dataset):
             for id in range(0, end_frame_id):
                 image_file = os.path.join(video, f"observation.images.rgb.{height}cm_{pitch_1}deg", f"episode_{ep_id:06d}_{id}.jpg")
 
+                # Get image from lmdb
                 image_data = txn.get(image_file.encode('utf-8'))
                 image = Image.open(io.BytesIO(image_data)).convert('RGB')
 
@@ -1278,8 +1280,8 @@ class NavPixelGoalDataset(Dataset):
                 depth_image = torch.as_tensor(np.ascontiguousarray(depth_image)).float()  # [H, W]
                 if id in history_id or id == start_frame_id:
                     if self.data_args.transform_train is not None:
-                        im = self.data_args.transform_train(history_images[history_id.index(id)])
-                    image, grid_thw = self.process_image_unified(im)
+                        image = self.data_args.transform_train(image)
+                    image, grid_thw = self.process_image_unified(image)
                     images.append(image)
                     grid_thws.append(grid_thw)
                     if id == start_frame_id and pose is not None:
