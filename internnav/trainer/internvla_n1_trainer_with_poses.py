@@ -201,22 +201,17 @@ def train(attn_implementation="flash_attention_2"):
         padding_side="right",
         use_fast=False,
     )
-    new_tokens = {"additional_special_tokens": ["<|pose_begin|>", "<|pose_end|>"]}
+    
+    existing_specials = list(tokenizer.additional_special_tokens)
+    new_tokens = ["<|pose_start|>", "<|pose_pad|>", "<|pose_end|>"]
+    combined = list(dict.fromkeys(existing_specials + new_tokens))
 
-    num_added = tokenizer.add_special_tokens(new_tokens)
-    print("Added:", num_added)
+    tokenizer.add_special_tokens({
+        "additional_special_tokens": combined
+    })
     
     # Resize model embeddings
     model.resize_token_embeddings(len(tokenizer))
-
-    save_path = model_args.output_dir
-
-    # Save updated tokenizer + model
-    tokenizer.save_pretrained(save_path)
-    model.save_pretrained(save_path)
-    
-    import sys
-    sys.exit()
 
     if data_args.model_type == "internvla-n1":
         model.get_model().initialize_vision_modules(model_args=model_args)
