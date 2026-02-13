@@ -199,6 +199,7 @@ TRAJ_TOKEN_INDEX = 151667
 DEFAULT_IMAGE_TOKEN = "<image>"
 DEFAULT_VIDEO_TOKEN = "<video>"
 DEFAULT_TRAJ_TOKEN = "<traj>"
+DEFAULT_POSE_TOKEN = "<pose>"
 
 local_rank = None
 
@@ -213,6 +214,7 @@ def preprocess_qwen_2_visual(
     tokenizer: transformers.PreTrainedTokenizer,
     grid_thw_image: List = [],
     grid_thw_video: List = [],
+    pose_max_len: int = 32,
 ) -> Dict:
     roles = {"human": "user", "gpt": "assistant"}
     system_message = "You are a helpful assistant."
@@ -276,6 +278,12 @@ def preprocess_qwen_2_visual(
                         visual_replicate_index_video += 1
                     new_parts.append(parts[-1])
                     content = "".join(new_parts)
+
+                if "<pose>" in content:
+                    content = content.replace(
+                        DEFAULT_POSE_TOKEN,
+                        "<|pose_start|>" + "<|pose_pad|>" * pose_max_len + "<|pose_end|>",
+                    )
 
             conv = [{"role": role, "content": content}]
             encode_id = tokenizer.apply_chat_template(conv)
@@ -1293,7 +1301,8 @@ class NavPixelGoalDataset(Dataset):
                         'from': 'human',
                         'value': f"You are an autonomous navigation assistant. Your task is to <instruction>. \
                         Where should you go next to stay on track? Please output the next waypoint's coordinates in the image. \
-                        Please output STOP when you have successfully completed the task. These are your historical observations: <history>. {random.choice(self.conjunctions)}<image>.",
+                        Please output STOP when you have successfully completed the task. These are your historical observations: <history>. {random.choice(self.conjunctions)}<image>. \
+                        And these are your historical positions: <pose>",
                     }
                 ]
             ]
@@ -1341,7 +1350,10 @@ class NavPixelGoalDataset(Dataset):
             chat_sources,
             self.tokenizer,
             grid_thw_image=grid_thw_merged if grid_thw_merged else None,
+            pose_max_len=start_frame_id
         )
+
+        breakpoint()
 
         position_ids, _ = self.get_rope_index(
             self.data_args.image_processor.merge_size,
