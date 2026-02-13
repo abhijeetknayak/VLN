@@ -35,6 +35,7 @@ import math
 
 
 lmdb_training = True
+normal_history = True
 
 # Define placeholders for dataset paths
 CAMBRIAN_737K = {
@@ -984,6 +985,8 @@ class NavPixelGoalDataset(Dataset):
                 pixel_goals = item['pixel_goals']
                 poses = item[f'poses_{height}cm_{pitch_2}deg']
 
+                ep_poses = np.array(poses)
+
                 actions_len = len(actions)
                 if actions_len < 4:
                     continue
@@ -1014,6 +1017,7 @@ class NavPixelGoalDataset(Dataset):
                                     height,
                                     pitch_1,
                                     pitch_2,
+                                    poses,
                                     instruction,
                                     (start_frame_id, start_frame_id + 1),
                                     turn_actions,
@@ -1035,6 +1039,7 @@ class NavPixelGoalDataset(Dataset):
                                 height,
                                 pitch_1,
                                 pitch_2,
+                                poses,
                                 instruction,
                                 (start_frame_id, start_frame_id + goal_len + 1),
                                 action,
@@ -1051,6 +1056,7 @@ class NavPixelGoalDataset(Dataset):
                         height,
                         pitch_1,
                         pitch_2,
+                        poses,
                         instruction,
                         (actions_len - 1, actions_len),
                         0,
@@ -1224,29 +1230,37 @@ class NavPixelGoalDataset(Dataset):
             height,
             pitch_1,
             pitch_2,
+            ep_poses,
             instruction,
             (start_frame_id, end_frame_id),
             action,
             pose,
         ) = self.list_data_dict[i]
 
-        metadata_lmdb_path = os.path.join(data_path, 'metadata_parquet.lmdb')
-        meta_env = lmdb.open(metadata_lmdb_path, subdir=False, readonly=True, lock=False)
+        breakpoint()
 
-        with meta_env.begin() as txn:
-            # Read actions from episode parquet
-            parquet_data = txn.get(parquet_key.encode('utf-8'))
+        if not normal_history:
 
-            parquet_data = pa.py_buffer(parquet_data)
-            table = pq.read_table(pa.BufferReader(parquet_data))
+            metadata_lmdb_path = os.path.join(data_path, 'metadata_parquet.lmdb')
+            meta_env = lmdb.open(metadata_lmdb_path, subdir=False, readonly=True, lock=False)
 
-            df = table.to_pandas()
-            episode_actions = df["action"].values
+            with meta_env.begin() as txn:
+                # Read actions from episode parquet
+                parquet_data = txn.get(parquet_key.encode('utf-8'))
+
+                parquet_data = pa.py_buffer(parquet_data)
+                table = pq.read_table(pa.BufferReader(parquet_data))
+
+                df = table.to_pandas()
+                episode_actions = df["action"].values
 
         if start_frame_id != 0:
             # history_id, history_images = self.get_history(data_path, video, height, pitch_1, pitch_2, ep_id, start_frame_id)
             # history_id = np.unique(np.linspace(0, start_frame_id - 1, self.num_history, dtype=np.int32)).tolist()
-            history_id = self.action_based_history_selection(episode_actions[:start_frame_id])
+            if normal_history:
+                history_id = np.unique(np.linspace(0, start_frame_id - 1, self.num_history, dtype=np.int32)).tolist()
+            else:
+                history_id = self.action_based_history_selection(episode_actions[:start_frame_id])
         else:
             history_id = []
 
