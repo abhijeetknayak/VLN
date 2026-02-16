@@ -33,6 +33,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import math
 
+from ..model.utils.utils import deltas_from_poses_world
+
 
 lmdb_training = True
 normal_history = True
@@ -201,7 +203,7 @@ def data_list(dataset_names):
 IGNORE_INDEX = -100
 IMAGE_TOKEN_INDEX = 151655
 VIDEO_TOKEN_INDEX = 151656
-TRAJ_TOKEN_INDEX = 151667
+TRAJ_TOKEN_INDEX = 151670
 DEFAULT_IMAGE_TOKEN = "<image>"
 DEFAULT_VIDEO_TOKEN = "<video>"
 DEFAULT_TRAJ_TOKEN = "<traj>"
@@ -1017,7 +1019,7 @@ class NavPixelGoalDataset(Dataset):
                                     height,
                                     pitch_1,
                                     pitch_2,
-                                    poses,
+                                    ep_poses,
                                     instruction,
                                     (start_frame_id, start_frame_id + 1),
                                     turn_actions,
@@ -1039,7 +1041,7 @@ class NavPixelGoalDataset(Dataset):
                                 height,
                                 pitch_1,
                                 pitch_2,
-                                poses,
+                                ep_poses,
                                 instruction,
                                 (start_frame_id, start_frame_id + goal_len + 1),
                                 action,
@@ -1056,7 +1058,7 @@ class NavPixelGoalDataset(Dataset):
                         height,
                         pitch_1,
                         pitch_2,
-                        poses,
+                        ep_poses,
                         instruction,
                         (actions_len - 1, actions_len),
                         0,
@@ -1217,7 +1219,10 @@ class NavPixelGoalDataset(Dataset):
         history_images.append(imgs[-1])
         
         return history_ids, history_images
-        
+
+    def generate_pose_inputs(self, history_ep_pose):
+        return deltas_from_poses_world(history_ep_pose)
+           
 
     def __getitem_lmdb__(self, i):
         # ForkedPdb().set_trace()
@@ -1325,6 +1330,9 @@ class NavPixelGoalDataset(Dataset):
             chat_sources[0][0]['value'] = (
                 chat_sources[0][0]['value'].replace('<instruction>', instruction).replace('<history>', history_imgs)
             )
+            history_ep_pose = ep_poses[:start_frame_id + 1]
+            breakpoint()
+            pose_input = self.generate_pose_inputs(history_ep_pose)
         else:
             chat_sources = [
                 [
@@ -1381,6 +1389,7 @@ class NavPixelGoalDataset(Dataset):
         data_dict["attention_mask"] = [data_dict["input_ids"][0].size(0)]
         data_dict["pixel_values"] = torch.cat(images, dim=0)
         data_dict["image_grid_thw"] = torch.cat([thw.unsqueeze(0) for thw in grid_thws], dim=0)
+        data_dict["pose_inputs"] = pose_input if start_frame_id != 0 else None
 
         if self.pixel_goal_only:
             goal_len = end_frame_id - start_frame_id - 1
