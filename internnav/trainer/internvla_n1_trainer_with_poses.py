@@ -201,7 +201,8 @@ def train(attn_implementation="flash_attention_2"):
         padding_side="right",
         use_fast=False,
     )
-    
+
+    # Add new tokens for pose information    
     existing_specials = list(tokenizer.additional_special_tokens)
     new_tokens = ["<|pose_start|>", "<|pose_pad|>", "<|pose_end|>"]
     combined = list(dict.fromkeys(existing_specials + new_tokens))
@@ -209,9 +210,6 @@ def train(attn_implementation="flash_attention_2"):
     tokenizer.add_special_tokens({
         "additional_special_tokens": combined
     })
-    
-    # Resize model embeddings
-    model.resize_token_embeddings(len(tokenizer))
 
     if data_args.model_type == "internvla-n1":
         model.get_model().initialize_vision_modules(model_args=model_args)
