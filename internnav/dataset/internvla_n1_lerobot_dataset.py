@@ -32,12 +32,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pyarrow as pa
 import pyarrow.parquet as pq
 import math
-
-from ..model.utils.utils import deltas_from_poses_world
+from scipy.spatial.transform import Rotation as R
 
 
 lmdb_training = True
 normal_history = True
+send_only_history_pose = True
 
 # Define placeholders for dataset paths
 CAMBRIAN_737K = {
@@ -172,6 +172,9 @@ data_dict = {
     "scalevln_125cm_0_45": SCALEVLN_125CM_0_45,
     "scalevln_60cm_30_30": SCALEVLN_60CM_30_30,
 }
+
+def wrap_to_pi_torch(a: torch.Tensor) -> torch.Tensor:
+    return (a + torch.pi) % (2 * torch.pi) - torch.pi
 
 
 def parse_sampling_rate(dataset_name):
@@ -1220,9 +1223,30 @@ class NavPixelGoalDataset(Dataset):
         
         return history_ids, history_images
 
-    def generate_pose_inputs(self, history_ep_pose):
-        return deltas_from_poses_world(history_ep_pose)
-           
+    def pose_feature_transform(self, 
+                               poses: torch.Tensor, 
+                               pos_scale: float = 10.0, clamp: float = 2.0):
+
+        rotation_matrices = poses[:, :3, :3] # Tensor of shape (T, 3, 3)
+        translation = poses[:, :3, 3] # Tensor of shape (T, 3)
+
+        assert rotation_matrices.dim() == 3 and rotation_matrices.shape[-2:] == (3, 3), f"R must be (T,3,3), got {rotation_matrices.shape}"
+        assert translation.dim() == 2 and translation.shape[0] == rotation_matrices.shape[0], f"t must be (T,*) matching R, got {translation.shape}"
+        T = rotation_matrices.shape[0]
+        device, dtype = rotation_matrices.device, rotation_matrices.dtype
+
+        feats = torch.zeros((T, 4), device=device, dtype=dtype)  # [x_rel, y_rel, sin(yaw), cos(yaw)]
+
+        yaw = R.from_matrix(rotation_matrices).as_euler('zyx', degrees=False)[:, 0]
+        yaw = torch.from_numpy(yaw)
+
+        feats[:, 0] = torch.clamp(translation[:, 0] / pos_scale, -clamp, clamp)  # x
+        feats[:, 1] = torch.clamp(translation[:, 1] / pos_scale, -clamp, clamp)  # y
+        feats[:, 2] = torch.sin(yaw)
+        feats[:, 3] = torch.cos(yaw)
+
+        return feats
+
 
     def __getitem_lmdb__(self, i):
         # ForkedPdb().set_trace()
@@ -1241,8 +1265,6 @@ class NavPixelGoalDataset(Dataset):
             action,
             pose,
         ) = self.list_data_dict[i]
-
-        breakpoint()
 
         if not normal_history:
 
@@ -1331,8 +1353,10 @@ class NavPixelGoalDataset(Dataset):
                 chat_sources[0][0]['value'].replace('<instruction>', instruction).replace('<history>', history_imgs)
             )
             history_ep_pose = ep_poses[:start_frame_id + 1]
-            breakpoint()
-            pose_input = self.generate_pose_inputs(history_ep_pose)
+            pose_feats = self.pose_feature_transform(torch.tensor(history_ep_pose))
+
+            if send_only_history_pose:
+                pose_feats = pose_feats[history_id + [start_frame_id]]
         else:
             chat_sources = [
                 [
@@ -1374,10 +1398,8 @@ class NavPixelGoalDataset(Dataset):
             chat_sources,
             self.tokenizer,
             grid_thw_image=grid_thw_merged if grid_thw_merged else None,
-            pose_max_len=start_frame_id
+            pose_max_len=self.num_history + 1 if send_only_history_pose else start_frame_id + 1
         )
-
-        breakpoint()
 
         position_ids, _ = self.get_rope_index(
             self.data_args.image_processor.merge_size,
@@ -1389,7 +1411,7 @@ class NavPixelGoalDataset(Dataset):
         data_dict["attention_mask"] = [data_dict["input_ids"][0].size(0)]
         data_dict["pixel_values"] = torch.cat(images, dim=0)
         data_dict["image_grid_thw"] = torch.cat([thw.unsqueeze(0) for thw in grid_thws], dim=0)
-        data_dict["pose_inputs"] = pose_input if start_frame_id != 0 else None
+        data_dict["pose_feats"] = pose_feats if start_frame_id != 0 else None
 
         if self.pixel_goal_only:
             goal_len = end_frame_id - start_frame_id - 1
@@ -1610,6 +1632,27 @@ class DataCollatorForSupervisedDataset(object):
 
         return multi_input_ids, multi_labels, t_s_pos
 
+
+    def collate_pose(self, pose_feats: List[torch.Tensor]) -> torch.Tensor:
+        B = len(pose_feats)
+        num_features = torch.tensor([x.shape[-1] for x in pose_feats if x is not None], dtype=torch.long)
+        lengths = torch.tensor([x.shape[0] for x in pose_feats if x is not None else 0], dtype=torch.long)
+        max_length = lengths.max().item()
+
+        padded_pose_feats = []
+        mask = torch.ones((B, max_length), dtype=torch.bool)
+        
+        for i, feat in enumerate(pose_feats):
+            if feat is None:
+                pad_length = max_length
+                padded_feat = torch.zeros((max_length, num_features[0]), dtype=torch.float32, device=mask.device)
+            else:
+                pad_length = max_length - feat.shape[0]
+                padded_feat = torch.nn.functional.pad(feat, (0, 0, 0, pad_length), "constant", 0)
+            padded_pose_feats.append(padded_feat)
+            mask[i, lengths[i]:] = 0
+        return torch.stack(padded_pose_feats, dim=0), mask
+
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         input_ids, labels, position_ids = tuple(
             [instance[key] for instance in instances] for key in ("input_ids", "labels", "position_ids")
@@ -1641,6 +1684,7 @@ class DataCollatorForSupervisedDataset(object):
         )
         images = list(instance["pixel_values"] for instance in instances if "pixel_values" in instance)
         videos = list(instance["pixel_values_videos"] for instance in instances if "pixel_values_videos" in instance)
+
         if len(images) != 0:
             concat_images = torch.cat([image for image in images], dim=0)
             grid_thw = [instance["image_grid_thw"] for instance in instances if "image_grid_thw" in instance]
@@ -1657,11 +1701,20 @@ class DataCollatorForSupervisedDataset(object):
             concat_videos = None
             video_grid_thw = None
 
+        if (len(pose_feats) != 0):
+            pose_feats = [instance.get("pose_feats", None) for instance in instances if "pose_feats" in instance]
+            concat_pose_feats, pose_mask = self.collate_pose(pose_feats)
+        else:
+            concat_pose_feats = None
+            pose_mask = None
+
         batch["pixel_values"] = concat_images
         batch["image_grid_thw"] = grid_thw
         batch["pixel_values_videos"] = concat_videos
         batch["video_grid_thw"] = video_grid_thw
         batch["position_ids"] = position_ids
+        batch["pose_feats"] = concat_pose_feats
+        batch["pose_mask"] = pose_mask
 
         if "traj_images" in instances[0]:
             traj_images, traj_depths, traj_poses = tuple(
