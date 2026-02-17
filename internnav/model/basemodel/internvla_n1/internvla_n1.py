@@ -14,8 +14,9 @@ from transformers import (
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from .internvla_n1_arch import InternVLAN1MetaForCausalLM, InternVLAN1MetaModel
+from internnav.model.basemodel.traj_encoder.trajectory_encoder import TrajectoryEncoderConfig, TrajectoryTransformerEncoder
 
-TRAJ_TOKEN_INDEX = 151667
+TRAJ_TOKEN_INDEX = 151670
 IMAGE_TOKEN_INDEX = 151655
 _RESNET_MEAN = [0.485, 0.456, 0.406]
 _RESNET_STD = [0.229, 0.224, 0.225]
@@ -46,6 +47,11 @@ class InternVLAN1ForCausalLM(Qwen2_5_VLForConditionalGeneration, InternVLAN1Meta
         self.model = InternVLAN1Model(config)
         self.rope_deltas = None
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
+        # TODO Make this modular
+        pose_enc_cfg = TrajectoryEncoderConfig(T_max=256, d_model=512, num_layers=3, nhead=8)
+        self.pose_encoder = TrajectoryTransformerEncoder(pose_enc_cfg)
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -79,6 +85,8 @@ class InternVLAN1ForCausalLM(Qwen2_5_VLForConditionalGeneration, InternVLAN1Meta
         traj_depths: Optional[torch.Tensor] = None,
         video_frame_num: Optional[torch.Tensor] = None,
         traj_poses: Optional[torch.Tensor] = None,
+        pose_feats: Optional[torch.Tensor] = None,
+        pose_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
             labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -118,7 +126,6 @@ class InternVLAN1ForCausalLM(Qwen2_5_VLForConditionalGeneration, InternVLAN1Meta
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "The image shows a street scene with a red stop sign in the foreground. In the background, there is a large red gate with Chinese characters ..."
         ```"""
-
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -162,6 +169,12 @@ class InternVLAN1ForCausalLM(Qwen2_5_VLForConditionalGeneration, InternVLAN1Meta
 
                 video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
                 inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+
+            if pose_feats is not None:
+                # Embed the poses into the input embeddings
+                # TODO
+                breakpoint()
+                pose_embeds = self.pose_encoder(pose_feats, pose_mask)
 
             n_traj_tokens = (input_ids == TRAJ_TOKEN_INDEX).sum().item()
             traj_idx = input_ids == TRAJ_TOKEN_INDEX
