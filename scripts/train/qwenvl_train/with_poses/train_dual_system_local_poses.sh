@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
+
 set -euo pipefail
 
 # ----------------------------
 # Single-node configuration
 # ----------------------------
 # Number of GPUs to use (1 or 2)
-NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 
 # Restrict to exactly 4 local GPUs (optional but recommended)
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 
+# Optional GPU visibility
+# export CUDA_VISIBLE_DEVICES="0,1"
 # Optional GPU visibility
 # export CUDA_VISIBLE_DEVICES="0,1"
 
@@ -30,7 +33,7 @@ system2_ckpt="checkpoints/InternVLA-N1-System2"
 # Training hyperparameters
 # ----------------------------
 lr="1e-4"
-batch_size="20"
+batch_size="15"
 grad_accum_steps="1"
 max_pixels="313600"
 min_pixels="3136"
@@ -98,6 +101,6 @@ torchrun --standalone \
   --logging_steps 1 \
   --model_max_length 8192 \
   --gradient_checkpointing True \
-  --dataloader_num_workers 0 \
+  --dataloader_num_workers 8 \
   --run_name "${run_name}" \
   --report_to wandb
