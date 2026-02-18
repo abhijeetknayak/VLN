@@ -74,8 +74,9 @@ VIDEOCHATGPT = {
 # }
 
 R2R_125CM_0_30 = {
-    "data_path": "/hnvme/workspace/v106be14-nav_data/InternData-N1/vln_ce/lmdbs/r2r",
-    "data_path": "/e/scratch/m3/nav/InternData-N1/vln_ce/lmdbs/r2r",
+    # "data_path": "/hnvme/workspace/v106be14-nav_data/InternData-N1/vln_ce/lmdbs/r2r",
+    # "data_path": "/e/scratch/m3/nav/InternData-N1/vln_ce/lmdbs/r2r",
+    "data_path": "/tmp/r2r",
     # "data_path": "/home/ikep64up/software/InternNav/data",
     "height": 125,
     "pitch_1": 0,
@@ -961,6 +962,7 @@ class NavPixelGoalDataset(Dataset):
         self.num_future_steps = data_args.num_future_steps
 
         self.list_data_dict = []
+        self.envs = {}
 
         for data in dataset_list:
             sampling_rate = data.get("sampling_rate", 1.0)
@@ -991,6 +993,7 @@ class NavPixelGoalDataset(Dataset):
                 poses = item[f'poses_{height}cm_{pitch_2}deg']
 
                 ep_poses = np.array(poses)
+                pose_feats = self.pose_feature_transform(torch.tensor(ep_poses))
 
                 actions_len = len(actions)
                 if actions_len < 4:
@@ -1022,7 +1025,7 @@ class NavPixelGoalDataset(Dataset):
                                     height,
                                     pitch_1,
                                     pitch_2,
-                                    ep_poses,
+                                    pose_feats,
                                     instruction,
                                     (start_frame_id, start_frame_id + 1),
                                     turn_actions,
@@ -1044,7 +1047,7 @@ class NavPixelGoalDataset(Dataset):
                                 height,
                                 pitch_1,
                                 pitch_2,
-                                ep_poses,
+                                pose_feats,
                                 instruction,
                                 (start_frame_id, start_frame_id + goal_len + 1),
                                 action,
@@ -1061,7 +1064,7 @@ class NavPixelGoalDataset(Dataset):
                         height,
                         pitch_1,
                         pitch_2,
-                        ep_poses,
+                        pose_feats,
                         instruction,
                         (actions_len - 1, actions_len),
                         0,
@@ -1247,10 +1250,17 @@ class NavPixelGoalDataset(Dataset):
 
         return feats
 
+    def _get_env(self, data_path):
+        obs_lmdb_path = os.path.join(data_path, 'observations.lmdb')
+        metadata_lmdb_path = os.path.join(data_path, 'metadata_parquet.lmdb')
+        if obs_lmdb_path not in self.envs:
+            self.envs[obs_lmdb_path] = lmdb.open(obs_lmdb_path, subdir=False, readonly=True, lock=False)
+        if metadata_lmdb_path not in self.envs:
+            self.envs[metadata_lmdb_path] = lmdb.open(metadata_lmdb_path, subdir=False, readonly=True, lock=False)
+
+        return self.envs[obs_lmdb_path], self.envs[metadata_lmdb_path]
 
     def __getitem_lmdb__(self, i):
-        # ForkedPdb().set_trace()
-        # breakpoint()
         (
             ep_id,
             data_path,
@@ -1259,21 +1269,20 @@ class NavPixelGoalDataset(Dataset):
             height,
             pitch_1,
             pitch_2,
-            ep_poses,
+            pose_feats,
             instruction,
             (start_frame_id, end_frame_id),
             action,
             pose,
         ) = self.list_data_dict[i]
 
+        obs_env, meta_env = self._get_env(data_path)
+
         if not normal_history:
 
-            metadata_lmdb_path = os.path.join(data_path, 'metadata_parquet.lmdb')
-            meta_env = lmdb.open(metadata_lmdb_path, subdir=False, readonly=True, lock=False)
-
-            with meta_env.begin() as txn:
+            with meta_env.begin() as meta_txn:
                 # Read actions from episode parquet
-                parquet_data = txn.get(parquet_key.encode('utf-8'))
+                parquet_data = meta_txn.get(parquet_key.encode('utf-8'))
 
                 parquet_data = pa.py_buffer(parquet_data)
                 table = pq.read_table(pa.BufferReader(parquet_data))
@@ -1296,23 +1305,21 @@ class NavPixelGoalDataset(Dataset):
         traj_images = []
         traj_depths = []  # optional
 
-        obs_lmdb_path = os.path.join(data_path, 'observations.lmdb')
-        env = lmdb.open(obs_lmdb_path, subdir=False, readonly=True, lock=False)
 
-        with env.begin() as txn:
+        with obs_env.begin() as obs_txn:
             for id in range(0, end_frame_id):
                 image_file = os.path.join(video, f"observation.images.rgb.{height}cm_{pitch_1}deg", f"episode_{ep_id:06d}_{id}.jpg")
 
                 # Get image from lmdb
-                image_data = txn.get(image_file.encode('utf-8'))
+                image_data = obs_txn.get(image_file.encode('utf-8'))
                 image = Image.open(io.BytesIO(image_data)).convert('RGB')
 
                 lookdown_image_key = image_file.replace(f'_{pitch_1}deg', f'_{pitch_2}deg')
-                lookdown_image_data = txn.get(lookdown_image_key.encode('utf-8'))
+                lookdown_image_data = obs_txn.get(lookdown_image_key.encode('utf-8'))
                 lookdown_image = Image.open(io.BytesIO(lookdown_image_data)).convert('RGB')
 
                 depth_image_key = image_file.replace(f'_{pitch_1}deg', f'_{pitch_2}deg').replace('rgb', 'depth').replace('.jpg', '.png')
-                depth_image_data = txn.get(depth_image_key.encode('utf-8'))
+                depth_image_data = obs_txn.get(depth_image_key.encode('utf-8'))
                 depth_image = Image.open(io.BytesIO(depth_image_data))
 
                 depth_image, resize_shape = self.preprocess_depth_image_v2(
@@ -1352,8 +1359,7 @@ class NavPixelGoalDataset(Dataset):
             chat_sources[0][0]['value'] = (
                 chat_sources[0][0]['value'].replace('<instruction>', instruction).replace('<history>', history_imgs)
             )
-            history_ep_pose = ep_poses[:start_frame_id + 1]
-            pose_feats = self.pose_feature_transform(torch.tensor(history_ep_pose))
+            pose_feats = pose_feats[:start_frame_id + 1]
 
             if send_only_history_pose:
                 pose_feats = pose_feats[history_id + [start_frame_id]]
@@ -1398,7 +1404,7 @@ class NavPixelGoalDataset(Dataset):
             chat_sources,
             self.tokenizer,
             grid_thw_image=grid_thw_merged if grid_thw_merged else None,
-            pose_max_len=self.num_history + 1 if send_only_history_pose else start_frame_id + 1
+            pose_max_len=len(history_id) + 1 if send_only_history_pose else start_frame_id + 1
         )
 
         position_ids, _ = self.get_rope_index(
@@ -1411,7 +1417,8 @@ class NavPixelGoalDataset(Dataset):
         data_dict["attention_mask"] = [data_dict["input_ids"][0].size(0)]
         data_dict["pixel_values"] = torch.cat(images, dim=0)
         data_dict["image_grid_thw"] = torch.cat([thw.unsqueeze(0) for thw in grid_thws], dim=0)
-        data_dict["pose_feats"] = pose_feats if start_frame_id != 0 else None
+        if start_frame_id != 0:
+            data_dict["pose_feats"] = pose_feats
 
         if self.pixel_goal_only:
             goal_len = end_frame_id - start_frame_id - 1
@@ -1636,7 +1643,7 @@ class DataCollatorForSupervisedDataset(object):
     def collate_pose(self, pose_feats: List[torch.Tensor]) -> torch.Tensor:
         B = len(pose_feats)
         num_features = torch.tensor([x.shape[-1] for x in pose_feats if x is not None], dtype=torch.long)
-        lengths = torch.tensor([x.shape[0] for x in pose_feats if x is not None else 0], dtype=torch.long)
+        lengths = torch.tensor([x.shape[0] for x in pose_feats if x is not None], dtype=torch.long)
         max_length = lengths.max().item()
 
         padded_pose_feats = []
@@ -1644,8 +1651,7 @@ class DataCollatorForSupervisedDataset(object):
         
         for i, feat in enumerate(pose_feats):
             if feat is None:
-                pad_length = max_length
-                padded_feat = torch.zeros((max_length, num_features[0]), dtype=torch.float32, device=mask.device)
+                padded_feat = torch.zeros((max_length, num_features[0]))
             else:
                 pad_length = max_length - feat.shape[0]
                 padded_feat = torch.nn.functional.pad(feat, (0, 0, 0, pad_length), "constant", 0)
@@ -1684,6 +1690,7 @@ class DataCollatorForSupervisedDataset(object):
         )
         images = list(instance["pixel_values"] for instance in instances if "pixel_values" in instance)
         videos = list(instance["pixel_values_videos"] for instance in instances if "pixel_values_videos" in instance)
+        pose_feats = list(instance["pose_feats"] for instance in instances if "pose_feats" in instance)
 
         if len(images) != 0:
             concat_images = torch.cat([image for image in images], dim=0)
@@ -1702,7 +1709,6 @@ class DataCollatorForSupervisedDataset(object):
             video_grid_thw = None
 
         if (len(pose_feats) != 0):
-            pose_feats = [instance.get("pose_feats", None) for instance in instances if "pose_feats" in instance]
             concat_pose_feats, pose_mask = self.collate_pose(pose_feats)
         else:
             concat_pose_feats = None
@@ -1713,7 +1719,7 @@ class DataCollatorForSupervisedDataset(object):
         batch["pixel_values_videos"] = concat_videos
         batch["video_grid_thw"] = video_grid_thw
         batch["position_ids"] = position_ids
-        batch["pose_feats"] = concat_pose_feats
+        batch["pose_feats"] = concat_pose_feats.to(torch.bfloat16) if concat_pose_feats is not None else None
         batch["pose_mask"] = pose_mask
 
         if "traj_images" in instances[0]:
