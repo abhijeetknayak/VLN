@@ -75,8 +75,8 @@ VIDEOCHATGPT = {
 
 R2R_125CM_0_30 = {
     # "data_path": "/hnvme/workspace/v106be14-nav_data/InternData-N1/vln_ce/lmdbs/r2r",
-    # "data_path": "/e/scratch/m3/nav/InternData-N1/vln_ce/lmdbs/r2r",
-    "data_path": "/tmp/r2r",
+    "data_path": "/e/scratch/m3/nav/InternData-N1/vln_ce/lmdbs/r2r",
+    # "data_path": "/tmp/r2r",
     # "data_path": "/home/ikep64up/software/InternNav/data",
     "height": 125,
     "pitch_1": 0,
