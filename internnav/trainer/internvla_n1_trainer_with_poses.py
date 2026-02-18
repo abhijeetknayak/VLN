@@ -180,6 +180,23 @@ def train(attn_implementation="flash_attention_2"):
         )
         data_args.model_type = "qwen2vl"
 
+    ###################### Check for any non-finite or huge parameters in the pose encoder before training ############
+    bad_params = []
+
+    for n, p in model.pose_encoder.named_parameters():
+        if p.is_meta:
+            bad_params.append((n, "META", None))
+            continue
+        p32 = p.detach().float()
+        if not torch.isfinite(p32).all():
+            bad_params.append((n, "NON_FINITE", None))
+        elif p32.abs().max().item() > 1e3:   # threshold: way larger than any sane init
+            bad_params.append((n, "HUGE", p32.abs().max().item()))
+
+    print("bad params:", bad_params[:30])
+
+    ####################################################################################################################
+
     if data_args.data_flatten:
         replace_qwen2_vl_attention_class()
     model.config.use_cache = False
