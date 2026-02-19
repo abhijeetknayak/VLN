@@ -165,8 +165,6 @@ def train(attn_implementation="flash_attention_2"):
     elif "qwen2.5" in model_args.model_name_or_path.lower():
         pose_enc_cfg = TrajectoryEncoderConfig(T_max=256, d_model=512, num_layers=3, nhead=8, use_deltas=False)
 
-        breakpoint()
-
         model = Qwen2_5_VLForConditionalGenerationWithPoseEncoder.from_pretrained(
             model_args.model_name_or_path,
             pose_enc_cfg=pose_enc_cfg,
@@ -229,7 +227,7 @@ def train(attn_implementation="flash_attention_2"):
         use_fast=False,
     )
 
-    # Add new tokens for pose information    
+    ############################## Add new tokens for pose information ##############################    
     existing_specials = list(tokenizer.additional_special_tokens)
     new_tokens = ["<|pose_start|>", "<|pose_pad|>", "<|pose_end|>"]
     combined = list(dict.fromkeys(existing_specials + new_tokens))
@@ -237,6 +235,8 @@ def train(attn_implementation="flash_attention_2"):
     tokenizer.add_special_tokens({
         "additional_special_tokens": combined
     })
+
+    #################################################################################################
 
     if data_args.model_type == "internvla-n1":
         model.get_model().initialize_vision_modules(model_args=model_args)
