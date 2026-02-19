@@ -7,6 +7,8 @@ from transformers import Qwen2_5_VLForConditionalGeneration
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLCausalLMOutputWithPast
 from ..traj_encoder.trajectory_encoder import TrajectoryTransformerEncoder
 
+POSE_TOKEN_ID = 151666
+
 class Qwen2_5_VLForConditionalGenerationWithPoseEncoder(Qwen2_5_VLForConditionalGeneration):
     def __init__(self, config, pose_enc_cfg=None):
         super().__init__(config)
@@ -161,6 +163,26 @@ class Qwen2_5_VLForConditionalGenerationWithPoseEncoder(Qwen2_5_VLForConditional
 
                 video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
                 inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+
+            if pose_feats is not None and self.pose_encoder is not None:
+                # Embed the poses into the input embeddings
+                pose_embeds = self.pose_encoder(pose_feats, pose_mask)
+                pose_embeds = pose_embeds.view(-1, pose_embeds.shape[-1])
+                pose_mask = pose_mask.view(-1)
+                pose_embeds = pose_embeds[pose_mask == 1]  # only keep the valid pose embeddings
+                n_pose_tokens = (input_ids == POSE_TOKEN_ID).sum().item()
+                n_pose_features = pose_embeds.shape[0]
+                if n_pose_tokens != n_pose_features:
+                    raise ValueError(
+                        f"Pose features and pose tokens do not match: tokens: {n_pose_tokens}, features {n_pose_features}"
+                    )
+                mask = input_ids == POSE_TOKEN_ID
+                mask_unsqueezed = mask.unsqueeze(-1)
+                mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
+                p_mask = mask_expanded.to(inputs_embeds.device)
+                
+                pose_embeds = pose_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                inputs_embeds = inputs_embeds.masked_scatter(p_mask, pose_embeds)
 
             if attention_mask is not None:
                 attention_mask = attention_mask.to(inputs_embeds.device)
