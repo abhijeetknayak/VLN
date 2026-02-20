@@ -31,6 +31,7 @@ sys.path.append(str(project_root))
 from qwenvl_base import replace_qwen2_vl_attention_class
 from transformers import (
     AutoProcessor,
+    AutoConfig,
     Qwen2_5_VLForConditionalGeneration,
     Qwen2VLForConditionalGeneration,
     Qwen2VLImageProcessor,
@@ -126,6 +127,32 @@ def set_model(model_args, model):
                 p.requires_grad = True
         model.model.latent_queries.requires_grad = True
 
+def _ddp_rank0() -> bool:
+    # Safe rank check regardless of whether torch.distributed is initialized yet.
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank() == 0
+    return True  # single-process or not initialized yet
+
+
+def _check_pose_encoder_params(model) -> None:
+    if getattr(model, "pose_encoder", None) is None:
+        return
+
+    bad_params = []
+    for n, p in model.pose_encoder.named_parameters():
+        if getattr(p, "is_meta", False):
+            bad_params.append((n, "META", None))
+            continue
+        p32 = p.detach().float()
+        if not torch.isfinite(p32).all():
+            bad_params.append((n, "NON_FINITE", None))
+        elif p32.abs().max().item() > 1e3:
+            bad_params.append((n, "HUGE", p32.abs().max().item()))
+
+    if _ddp_rank0():
+        print("bad params:", bad_params[:30])
+
+
 
 def train(attn_implementation="flash_attention_2"):
     global local_rank
@@ -164,7 +191,6 @@ def train(attn_implementation="flash_attention_2"):
         data_args.model_type = "internvla-n1"
     elif "qwen2.5" in model_args.model_name_or_path.lower():
         pose_enc_cfg = TrajectoryEncoderConfig(T_max=256, d_model=512, num_layers=3, nhead=8, use_deltas=False)
-
         model = Qwen2_5_VLForConditionalGenerationWithPoseEncoder.from_pretrained(
             model_args.model_name_or_path,
             pose_enc_cfg=pose_enc_cfg,
@@ -188,22 +214,8 @@ def train(attn_implementation="flash_attention_2"):
         )
         data_args.model_type = "qwen2vl"
 
-    ###################### Check for any non-finite or huge parameters in the pose encoder before training ############
-    bad_params = []
+    _check_pose_encoder_params(model)
 
-    for n, p in model.pose_encoder.named_parameters():
-        if p.is_meta:
-            bad_params.append((n, "META", None))
-            continue
-        p32 = p.detach().float()
-        if not torch.isfinite(p32).all():
-            bad_params.append((n, "NON_FINITE", None))
-        elif p32.abs().max().item() > 1e3:   # threshold: way larger than any sane init
-            bad_params.append((n, "HUGE", p32.abs().max().item()))
-
-    print("bad params:", bad_params[:30])
-
-    ####################################################################################################################
 
     if data_args.data_flatten:
         replace_qwen2_vl_attention_class()
@@ -242,9 +254,49 @@ def train(attn_implementation="flash_attention_2"):
         model.get_model().initialize_vision_modules(model_args=model_args)
     set_model(model_args, model)
 
+    # PEFT
+    from peft import LoraConfig, get_peft_model, TaskType
+
+    for param in model.parameters():
+        param.requires_grad = False
+
+    lora_targets = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+    include_keywords = ["model"]   
+    exclude_keywords = ["visual"]
+
+    def lora_filter(module_name: str) -> bool:
+        if not module_name.endswith(tuple(lora_targets)):
+            return False
+        inc = any(k in module_name for k in include_keywords)
+        exc = any(k in module_name for k in exclude_keywords)
+        return inc and not exc
+
+    target_module_names = []
+    for name, mod in model.named_modules():
+        if isinstance(mod, torch.nn.Linear) and lora_filter(name):
+            target_module_names.append(name)
+
+    modules_to_save = ["pose_encoder", "visual"]
+
+    lora_cfg = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.05,
+        bias="none",
+        target_modules=target_module_names,
+        modules_to_save=modules_to_save,
+    )
+
+    model = get_peft_model(model, lora_cfg)
+
+    for n, p in model.named_parameters():
+        if any(ms in n for ms in modules_to_save):
+            p.requires_grad = True    
+
     if torch.distributed.get_rank() == 0:
-        model.visual.print_trainable_parameters()
-        model.model.print_trainable_parameters()
+        model.print_trainable_parameters()
 
     if data_args.data_packing:
         data_module = make_supervised_data_module_packed(tokenizer=tokenizer, data_args=data_args)  # noqa: F821
@@ -268,6 +320,7 @@ def train(attn_implementation="flash_attention_2"):
 
     model.config.use_cache = True
 
+    trainer.model.save_pretrained(training_args.output_dir)
     safe_save_model_for_hf_trainer(trainer=trainer, output_dir=training_args.output_dir)
 
 
