@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
@@ -9,33 +10,16 @@ from ..traj_encoder.trajectory_encoder import TrajectoryTransformerEncoder
 
 POSE_TOKEN_ID = 151666
 
+
 class Qwen2_5_VLForConditionalGenerationWithPoseEncoder(Qwen2_5_VLForConditionalGeneration):
     def __init__(self, config, pose_enc_cfg=None):
         super().__init__(config)
 
         self.pose_enc_cfg = pose_enc_cfg
+        self.pose_encoder = TrajectoryTransformerEncoder(pose_enc_cfg) if pose_enc_cfg is not None else None
 
-        if self.pose_enc_cfg is not None:
-            # Encode pose with a separate transformer encoder
-            self.pose_encoder = TrajectoryTransformerEncoder(pose_enc_cfg)
-        else:
-            self.pose_encoder = None
-
-        if self.pose_encoder is not None:
-
-            if any(p.is_meta for p in self.pose_encoder.parameters()):
-                self.pose_encoder = self.pose_encoder.to_empty(device="cuda")
-
-                # IMPORTANT: initialize after to_empty, otherwise garbage values
-                def reinit(m):
-                    if hasattr(m, "reset_parameters"):
-                        m.reset_parameters()
-                self.pose_encoder.apply(reinit)
-            else:
-                self.pose_encoder = self.pose_encoder.to("cuda")
-
-        # Keep HF initialization behavior
         self.post_init()
+
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, pose_enc_cfg=None, **kwargs):
@@ -46,19 +30,9 @@ class Qwen2_5_VLForConditionalGenerationWithPoseEncoder(Qwen2_5_VLForConditional
             # Attach pose modules after loading base weights to avoid issues with missing keys
             model.pose_enc_cfg = pose_enc_cfg
             model.pose_encoder = TrajectoryTransformerEncoder(pose_enc_cfg)
-
-            if any(p.is_meta for p in model.pose_encoder.parameters()):
-                model.pose_encoder = model.pose_encoder.to_empty(device="cuda")
-
-                # IMPORTANT: initialize after to_empty, otherwise garbage values
-                def reinit(m):
-                    if hasattr(m, "reset_parameters"):
-                        m.reset_parameters()
-                model.pose_encoder.apply(reinit)
-            else:
-                model.pose_encoder = model.pose_encoder.to("cuda")
         
         return model
+
 
     def forward(
         self,
