@@ -43,8 +43,8 @@ max_pixels=313600
 min_pixels=3136
 
 # Dataset configuration (replace with public dataset names)
-# vln_datasets=r2r_125cm_0_30,r2r_125cm_0_45,r2r_60cm_15_15,r2r_60cm_30_30,rxr_125cm_0_30,rxr_125cm_0_45,rxr_60cm_15_15,rxr_60cm_30_30 #,scalevln_125cm_0_30,scalevln_60cm_30_30
-vln_datasets=r2r_125cm_0_30
+vln_datasets=r2r_125cm_0_30,r2r_125cm_0_45,r2r_60cm_15_15,r2r_60cm_30_30,rxr_125cm_0_30,rxr_125cm_0_45,rxr_60cm_15_15,rxr_60cm_30_30,scalevln_125cm_0_30,scalevln_60cm_30_30
+# vln_datasets=r2r_125cm_0_30
 
 # Output configuration
 run_name=Qwen2.5-VL-7B-Instruct_with_pose_encoder
@@ -78,7 +78,7 @@ torchrun --nnodes=$NNODES --nproc_per_node=$NPROC_PER_NODE \
     --system1 "none" \
     \
     --output_dir ${output_dir} \
-    --num_train_epochs 2.0 \
+    --num_train_epochs 5.0 \
     --per_device_train_batch_size ${batch_size} \
     --per_device_eval_batch_size $((batch_size*2)) \
     --gradient_accumulation_steps ${grad_accum_steps} \
