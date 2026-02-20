@@ -1,9 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+
+FOLDER=/e/scratch/m3/nav/VLN
+############################## WANDB ###############################
+# Write W&B files to job-local storage (change to your fast scratch)
+export WANDB_DIR="$FOLDER/wandb"
+export WANDB_CACHE_DIR="$WANDB_DIR/cache"
+export WANDB_CONFIG_DIR="$WANDB_DIR/config"
+
+# Offline mode: never tries to contact wandb servers
+export WANDB_MODE=offline
+
+# (Optional) avoid background service quirks on restricted systems
+export WANDB_START_METHOD=thread
+####################################################################
+
+
 # Distributed training configuration
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MASTER_PORT="${MASTER_PORT:-29501}"
+RDZV_ID="${RDZV_ID:-12345}"
+NNODES="${NNODES:-1}"
 
 NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
 
@@ -19,7 +37,7 @@ llm=checkpoints/Qwen2.5-VL-7B-Instruct
 # Training hyperparameters
 lr=2e-5
 vision_tower_lr=5e-6
-batch_size=2
+batch_size=6
 grad_accum_steps=1
 max_pixels=313600
 min_pixels=3136
@@ -29,21 +47,24 @@ min_pixels=3136
 vln_datasets=r2r_125cm_0_30
 
 # Output configuration
-run_name=InternVLA-N1-System2-Updated
+run_name=Qwen2.5-VL-7B-Instruct_with_pose_encoder
 output_dir=checkpoints/${run_name}
 
-torchrun --nnodes=1 \
-    --nproc_per_node="${NPROC_PER_NODE}" \
-    --master_addr="${MASTER_ADDR}" \
-    --master_port="${MASTER_PORT}" \
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=INIT,NET
+export NCCL_ASYNC_ERROR_HANDLING=1
+
+torchrun --nnodes=$NNODES --nproc_per_node=$NPROC_PER_NODE \
+    --rdzv_id=$RDZV_ID --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
     internnav/trainer/s2_trainer_with_poses.py \
     --deepspeed ${deepspeed} \
     --model_name_or_path "${llm}" \
     --vln_dataset_use ${vln_datasets} \
     --data_flatten False \
     --tune_mm_vision True \
-    --tune_mm_mlp False \
-    --tune_mm_llm False \
+    --tune_mm_mlp True \
+    --tune_mm_llm True \
     --bf16 \
     \
     --num_history 8 \
