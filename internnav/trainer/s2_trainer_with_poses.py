@@ -255,7 +255,7 @@ def train(attn_implementation="flash_attention_2"):
     set_model(model_args, model)
 
     # PEFT
-    from peft import LoraConfig, get_peft_model, TaskType
+    from peft import LoraConfig, get_peft_model, TaskType, PeftModel
 
     for param in model.parameters():
         param.requires_grad = False
@@ -288,6 +288,9 @@ def train(attn_implementation="flash_attention_2"):
         target_modules=target_module_names,
         modules_to_save=modules_to_save,
     )
+
+    if isinstance(model, PeftModel):
+        model = model.unload()
 
     model = get_peft_model(model, lora_cfg)
 
