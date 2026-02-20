@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
+
 set -euo pipefail
 
-# ----------------------------
-# Single-node configuration
-# ----------------------------
-# Number of GPUs to use (1 or 2)
-NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
+# Expect these exported by sbatch/srun:
+: "${NNODES:?need NNODES}"
+: "${NPROC_PER_NODE:?need NPROC_PER_NODE}"
+: "${MASTER_ADDR:?need MASTER_ADDR}"
+: "${MASTER_PORT:?need MASTER_PORT}"
+: "${RDZV_ID:?need RDZV_ID}"
+
+echo "Host: $(hostname)"
+echo "NNODES=$NNODES NPROC_PER_NODE=$NPROC_PER_NODE"
+echo "RDZV: id=$RDZV_ID endpoint=${MASTER_ADDR}:${MASTER_PORT}"
 
 # Restrict to exactly 4 local GPUs (optional but recommended)
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-
-# Optional GPU visibility
-# export CUDA_VISIBLE_DEVICES="0,1"
-
-MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
-MASTER_PORT="${MASTER_PORT:-29501}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 
 # ----------------------------
 # DeepSpeed configuration
@@ -30,7 +30,7 @@ system2_ckpt="checkpoints/InternVLA-N1-System2"
 # Training hyperparameters
 # ----------------------------
 lr="1e-4"
-batch_size="20"
+batch_size="15"
 grad_accum_steps="1"
 max_pixels="313600"
 min_pixels="3136"
@@ -44,7 +44,7 @@ vln_datasets="r2r_125cm_0_30%30"
 # ----------------------------
 # Output / system config
 # ----------------------------
-run_name="InternVLA-N1-DualVLN"
+run_name="InternVLA-N1-DualVLN-tokenizer-updated"
 output_dir="checkpoints/${run_name}"
 
 # system1 options: nextdit_async, navdp_async, nextdit
@@ -53,12 +53,13 @@ system1="nextdit_async"
 # ----------------------------
 # Launch (single node)
 # ----------------------------
-torchrun --standalone \
-  --nnodes=1 \
-  --nproc_per_node="${NPROC_PER_NODE}" \
-  --master_addr="${MASTER_ADDR}" \
-  --master_port="${MASTER_PORT}" \
-  internnav/trainer/internvla_n1_trainer.py \
+torchrun \
+  --nnodes="$NNODES" \
+  --nproc_per_node="$NPROC_PER_NODE" \
+  --rdzv_id="$RDZV_ID" \
+  --rdzv_backend="c10d" \
+  --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
+  internnav/trainer/internvla_n1_trainer_with_poses.py \
   --deepspeed "${deepspeed}" \
   --model_name_or_path "${system2_ckpt}" \
   --vln_dataset_use "${vln_datasets}" \
@@ -98,6 +99,6 @@ torchrun --standalone \
   --logging_steps 1 \
   --model_max_length 8192 \
   --gradient_checkpointing True \
-  --dataloader_num_workers 0 \
+  --dataloader_num_workers 8 \
   --run_name "${run_name}" \
   --report_to wandb

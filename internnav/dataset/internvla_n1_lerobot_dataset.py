@@ -26,142 +26,18 @@ from .vlln_lerobot_dataset import VLLNDataset
 import sys
 import pdb
 
+from vggt_slam.frame_overlap import FrameTracker
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+import math
+from scipy.spatial.transform import Rotation as R
 
-lmdb_training = True
+from .dataset_configs import *
 
-# Define placeholders for dataset paths
-CAMBRIAN_737K = {
-    "annotation_path": "PATH_TO_CAMBRIAN_737K_ANNOTATION",
-    "data_path": "",
-}
-
-CAMBRIAN_737K_PACK = {
-    "annotation_path": f"PATH_TO_CAMBRIAN_737K_ANNOTATION_PACKED",  # noqa: F541
-    "data_path": "",
-}
-
-MP_DOC = {
-    "annotation_path": "PATH_TO_MP_DOC_ANNOTATION",
-    "data_path": "PATH_TO_MP_DOC_DATA",
-}
-
-CLEVR_MC = {
-    "annotation_path": "PATH_TO_CLEVR_MC_ANNOTATION",
-    "data_path": "PATH_TO_CLEVR_MC_DATA",
-}
-
-VIDEOCHATGPT = {
-    "annotation_path": "PATH_TO_VIDEOCHATGPT_ANNOTATION",
-    "data_path": "PATH_TO_VIDEOCHATGPT_DATA",
-}
-
-
-# R2R_125CM_0_30 = {
-#     "data_path": "traj_data/r2r",
-#     "height": 125,
-#     "pitch_1": 0,
-#     "pitch_2": 30,
-# }
-
-R2R_125CM_0_30 = {
-    "data_path": "/hnvme/workspace/v106be14-nav_data/InternData-N1/vln_ce/lmdbs/r2r",
-    # "data_path": "/home/ikep64up/software/InternNav/data",
-    "height": 125,
-    "pitch_1": 0,
-    "pitch_2": 30,
-}
-
-
-
-R2R_125CM_0_45 = {
-    "data_path": "/hnvme/workspace/v106be14-nav_data/InternData-N1/vln_ce/lmdbs/r2r",
-    "height": 125,
-    "pitch_1": 0,
-    "pitch_2": 45,
-}
-
-R2R_60CM_15_15 = {
-    "data_path": "/mnt/dataset_drive/nav_datasets/raw-datasets/InternData-N1/vln_ce/traj_data/r2r",
-    "height": 60,
-    "pitch_1": 15,
-    "pitch_2": 15,
-}
-
-R2R_60CM_30_30 = {
-    "data_path": "/mnt/dataset_drive/nav_datasets/raw-datasets/InternData-N1/vln_ce/traj_data/r2r",
-    "height": 60,
-    "pitch_1": 30,
-    "pitch_2": 30,
-}
-
-RxR_125CM_0_30 = {
-    "data_path": "/mnt/dataset_drive/nav_datasets/raw-datasets/InternData-N1/vln_ce/traj_data/rxr",
-    "height": 125,
-    "pitch_1": 0,
-    "pitch_2": 30,
-}
-
-RxR_125CM_0_45 = {
-    "data_path": "traj_data/rxr",
-    "height": 125,
-    "pitch_1": 0,
-    "pitch_2": 45,
-}
-
-RxR_60CM_15_15 = {
-    "data_path": "traj_data/rxr",
-    "height": 60,
-    "pitch_1": 15,
-    "pitch_2": 15,
-}
-
-RxR_60CM_30_30 = {
-    "data_path": "traj_data/rxr",
-    "height": 60,
-    "pitch_1": 30,
-    "pitch_2": 30,
-}
-
-SCALEVLN_125CM_0_30 = {
-    "data_path": "traj_data/scalevln",
-    "height": 125,
-    "pitch_1": 0,
-    "pitch_2": 30,
-}
-
-SCALEVLN_125CM_0_45 = {
-    "data_path": "traj_data/scalevln",
-    "height": 125,
-    "pitch_1": 0,
-    "pitch_2": 45,
-}
-
-SCALEVLN_60CM_30_30 = {
-    "data_path": "traj_data/scalevln",
-    "height": 60,
-    "pitch_1": 30,
-    "pitch_2": 30,
-}
-
-data_dict = {
-    "cambrian_737k": CAMBRIAN_737K,
-    "cambrian_737k_pack": CAMBRIAN_737K_PACK,
-    "mp_doc": MP_DOC,
-    "clevr_mc": CLEVR_MC,
-    "videochatgpt": VIDEOCHATGPT,
-    "r2r_125cm_0_30": R2R_125CM_0_30,
-    "r2r_125cm_0_45": R2R_125CM_0_45,
-    "r2r_60cm_15_15": R2R_60CM_15_15,
-    "r2r_60cm_30_30": R2R_60CM_30_30,
-    "rxr_125cm_0_30": RxR_125CM_0_30,
-    "rxr_125cm_0_45": RxR_125CM_0_45,
-    "rxr_60cm_15_15": RxR_60CM_15_15,
-    "rxr_60cm_30_30": RxR_60CM_30_30,
-    "scalevln_125cm_0_30": SCALEVLN_125CM_0_30,
-    "scalevln_125cm_0_45": SCALEVLN_125CM_0_45,
-    "scalevln_60cm_30_30": SCALEVLN_60CM_30_30,
-}
+def wrap_to_pi_torch(a: torch.Tensor) -> torch.Tensor:
+    return (a + torch.pi) % (2 * torch.pi) - torch.pi
 
 
 def parse_sampling_rate(dataset_name):
@@ -193,10 +69,11 @@ def data_list(dataset_names):
 IGNORE_INDEX = -100
 IMAGE_TOKEN_INDEX = 151655
 VIDEO_TOKEN_INDEX = 151656
-TRAJ_TOKEN_INDEX = 151667
+TRAJ_TOKEN_INDEX = 151670
 DEFAULT_IMAGE_TOKEN = "<image>"
 DEFAULT_VIDEO_TOKEN = "<video>"
 DEFAULT_TRAJ_TOKEN = "<traj>"
+DEFAULT_POSE_TOKEN = "<pose>"
 
 local_rank = None
 
@@ -211,6 +88,7 @@ def preprocess_qwen_2_visual(
     tokenizer: transformers.PreTrainedTokenizer,
     grid_thw_image: List = [],
     grid_thw_video: List = [],
+    pose_max_len: int = 32,
 ) -> Dict:
     roles = {"human": "user", "gpt": "assistant"}
     system_message = "You are a helpful assistant."
@@ -274,6 +152,12 @@ def preprocess_qwen_2_visual(
                         visual_replicate_index_video += 1
                     new_parts.append(parts[-1])
                     content = "".join(new_parts)
+
+                if "<pose>" in content:
+                    content = content.replace(
+                        DEFAULT_POSE_TOKEN,
+                        "<|pose_start|>" + "<|pose_pad|>" * pose_max_len + "<|pose_end|>",
+                    )
 
             conv = [{"role": role, "content": content}]
             encode_id = tokenizer.apply_chat_template(conv)
@@ -839,10 +723,6 @@ def get_annotations_from_lerobot_data(data_path, setting):
     return annotations
 
 def get_annotations_from_lmdb(data_path, setting):
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    import pyarrow as pa
-    import pyarrow.parquet as pq
 
     annotations = {
         "axis_align_matrix": [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
@@ -907,6 +787,7 @@ def get_annotations_from_lmdb(data_path, setting):
                         "length": ep_len,
                         f"poses_{setting}": ep_poses,
                         "pixel_goals": ep_pixel_goals,
+                        "parquet_key": parquet_key,
                     }
                     scene_annotations.append(episode)
         return scene_annotations        
@@ -943,6 +824,7 @@ class NavPixelGoalDataset(Dataset):
         self.num_future_steps = data_args.num_future_steps
 
         self.list_data_dict = []
+        self.envs = {}
 
         for data in dataset_list:
             sampling_rate = data.get("sampling_rate", 1.0)
@@ -967,9 +849,13 @@ class NavPixelGoalDataset(Dataset):
                 ep_id = item['id']
                 instruction = item['instructions']
                 video = item['video']
+                parquet_key = item['parquet_key']
                 actions = item['actions'][1:] + [0]
                 pixel_goals = item['pixel_goals']
                 poses = item[f'poses_{height}cm_{pitch_2}deg']
+
+                ep_poses = np.array(poses)
+                pose_feats = self.pose_feature_transform(torch.tensor(ep_poses))
 
                 actions_len = len(actions)
                 if actions_len < 4:
@@ -997,9 +883,11 @@ class NavPixelGoalDataset(Dataset):
                                     ep_id,
                                     data_path,
                                     video,
+                                    parquet_key,
                                     height,
                                     pitch_1,
                                     pitch_2,
+                                    pose_feats,
                                     instruction,
                                     (start_frame_id, start_frame_id + 1),
                                     turn_actions,
@@ -1017,9 +905,11 @@ class NavPixelGoalDataset(Dataset):
                                 ep_id,
                                 data_path,
                                 video,
+                                parquet_key,
                                 height,
                                 pitch_1,
                                 pitch_2,
+                                pose_feats,
                                 instruction,
                                 (start_frame_id, start_frame_id + goal_len + 1),
                                 action,
@@ -1032,9 +922,11 @@ class NavPixelGoalDataset(Dataset):
                         ep_id,
                         data_path,
                         video,
+                        parquet_key,
                         height,
                         pitch_1,
                         pitch_2,
+                        pose_feats,
                         instruction,
                         (actions_len - 1, actions_len),
                         0,
@@ -1102,25 +994,171 @@ class NavPixelGoalDataset(Dataset):
             return self.__getitem_lmdb__(i)
         else:
             return self.__getitem_lerobot__(i)
+
+    def action_masking_adaptive(self, actions, target_kept=12, turn_to_fwd_ratio=0.4, min_fwd_threshold=3, max_fwd_threshold=25, min_turn_threshold=1, max_turn_threshold=8):
+        N = len(actions)
+        if N == 0:
+            return []
+
+        # base step: roughly "how many steps per kept frame"
+        steps_per_keep = max(1, N // max(1, target_kept))
+
+        # Derive thresholds
+        fwd_threshold = int(max(min_fwd_threshold,
+                                min(max_fwd_threshold, steps_per_keep)))
+
+        turn_threshold = int(max(min_turn_threshold,
+                                min(max_turn_threshold, math.ceil(steps_per_keep * turn_to_fwd_ratio))))
+
+        return self.action_based_history_selection(actions, fwd_threshold=fwd_threshold, turn_threshold=turn_threshold)
+
+    def action_based_history_selection(self, actions, fwd_threshold=8, turn_threshold=3):
+        total_actions = len(actions)
+        selected_indices = []
+        fwd_counter = 0
+        l_turn_counter = 0
+        r_turn_counter = 0
+
+        def clear_counters():
+            nonlocal fwd_counter, l_turn_counter, r_turn_counter
+            fwd_counter = 0
+            l_turn_counter = 0
+            r_turn_counter = 0
+
+        for idx in range(total_actions):
+            if actions[idx] == -1:  # first frame
+                selected_indices.append(idx)
+                clear_counters()
+            elif actions[idx] == 1:  # forward
+                fwd_counter += 1
+            elif actions[idx] == 2:  # left turn
+                l_turn_counter += 1
+                if r_turn_counter > 0:  # if we were previously counting right turns, reset that counter
+                    r_turn_counter -= 1
+            elif actions[idx] == 3:  # right turn
+                r_turn_counter += 1
+                if l_turn_counter > 0:  # if we were previously counting left turns, reset that counter
+                    l_turn_counter -= 1
+
+            # Masking logic:
+            if fwd_counter >= fwd_threshold:
+                selected_indices.append(idx)
+                clear_counters()  # reset after a forward run
+            
+            elif l_turn_counter >= turn_threshold:
+                selected_indices.append(idx)
+                clear_counters()  # reset after a turn run
+            
+            elif r_turn_counter >= turn_threshold:
+                selected_indices.append(idx)
+                clear_counters()  # reset after a turn run
+        return selected_indices
+
+    def get_history(self, data_path, video, height, pitch_1, pitch_2, ep_id, start_frame_id):
+        imgs = []
+        image_names = []
+
+        obs_lmdb_path = os.path.join(data_path, 'observations.lmdb')
+        env = lmdb.open(obs_lmdb_path, subdir=False, readonly=True, lock=False)
+
+        with env.begin() as txn:
+            for id in range(0, start_frame_id + 1):
+                image_file = os.path.join(video, f"observation.images.rgb.{height}cm_{pitch_1}deg", f"episode_{ep_id:06d}_{id}.jpg")
+                image_names.append(image_file)
+
+                # Get image from lmdb
+                image_data = txn.get(image_file.encode('utf-8'))
+                image = Image.open(io.BytesIO(image_data)).convert('RGB')
+                imgs.append(image)
+
+        flow_tracker = FrameTracker()
+
+        history_ids = []
+        history_images = []
+
+        # history images are in order 
+        for i in range(len(imgs) - 1):
+            enough_disparity = flow_tracker.compute_disparity(np.array(imgs[i]), min_disparity=50.0, visualize=False)
+            if enough_disparity:
+                history_ids.append(i)
+                history_images.append(imgs[i])
         
+        history_ids.append(len(imgs) - 1)
+        history_images.append(imgs[-1])
+        
+        return history_ids, history_images
+
+    def pose_feature_transform(self, 
+                               poses: torch.Tensor, 
+                               pos_scale: float = 10.0, clamp: float = 2.0):
+
+        rotation_matrices = poses[:, :3, :3] # Tensor of shape (T, 3, 3)
+        translation = poses[:, :3, 3] # Tensor of shape (T, 3)
+
+        assert rotation_matrices.dim() == 3 and rotation_matrices.shape[-2:] == (3, 3), f"R must be (T,3,3), got {rotation_matrices.shape}"
+        assert translation.dim() == 2 and translation.shape[0] == rotation_matrices.shape[0], f"t must be (T,*) matching R, got {translation.shape}"
+        T = rotation_matrices.shape[0]
+        device, dtype = rotation_matrices.device, rotation_matrices.dtype
+
+        feats = torch.zeros((T, 4), device=device, dtype=dtype)  # [x_rel, y_rel, sin(yaw), cos(yaw)]
+
+        yaw = R.from_matrix(rotation_matrices).as_euler('zyx', degrees=False)[:, 0]
+        yaw = torch.from_numpy(yaw)
+
+        feats[:, 0] = torch.clamp(translation[:, 0] / pos_scale, -clamp, clamp)  # x
+        feats[:, 1] = torch.clamp(translation[:, 1] / pos_scale, -clamp, clamp)  # y
+        feats[:, 2] = torch.sin(yaw)
+        feats[:, 3] = torch.cos(yaw)
+
+        return feats
+
+    def _get_env(self, data_path):
+        obs_lmdb_path = os.path.join(data_path, 'observations.lmdb')
+        metadata_lmdb_path = os.path.join(data_path, 'metadata_parquet.lmdb')
+        if obs_lmdb_path not in self.envs:
+            self.envs[obs_lmdb_path] = lmdb.open(obs_lmdb_path, subdir=False, readonly=True, lock=False)
+        if metadata_lmdb_path not in self.envs:
+            self.envs[metadata_lmdb_path] = lmdb.open(metadata_lmdb_path, subdir=False, readonly=True, lock=False)
+
+        return self.envs[obs_lmdb_path], self.envs[metadata_lmdb_path]
 
     def __getitem_lmdb__(self, i):
-        # ForkedPdb().set_trace()
-        # breakpoint()
         (
             ep_id,
             data_path,
             video,
+            parquet_key,
             height,
             pitch_1,
             pitch_2,
+            pose_feats,
             instruction,
             (start_frame_id, end_frame_id),
             action,
             pose,
         ) = self.list_data_dict[i]
+
+        obs_env, meta_env = self._get_env(data_path)
+
+        if not normal_history:
+
+            with meta_env.begin() as meta_txn:
+                # Read actions from episode parquet
+                parquet_data = meta_txn.get(parquet_key.encode('utf-8'))
+
+                parquet_data = pa.py_buffer(parquet_data)
+                table = pq.read_table(pa.BufferReader(parquet_data))
+
+                df = table.to_pandas()
+                episode_actions = df["action"].values
+
         if start_frame_id != 0:
-            history_id = np.unique(np.linspace(0, start_frame_id - 1, self.num_history, dtype=np.int32)).tolist()
+            # history_id, history_images = self.get_history(data_path, video, height, pitch_1, pitch_2, ep_id, start_frame_id)
+            # history_id = np.unique(np.linspace(0, start_frame_id - 1, self.num_history, dtype=np.int32)).tolist()
+            if normal_history:
+                history_id = np.unique(np.linspace(0, start_frame_id - 1, self.num_history, dtype=np.int32)).tolist()
+            else:
+                history_id = self.action_based_history_selection(episode_actions[:start_frame_id])
         else:
             history_id = []
 
@@ -1129,23 +1167,21 @@ class NavPixelGoalDataset(Dataset):
         traj_images = []
         traj_depths = []  # optional
 
-        obs_lmdb_path = os.path.join(data_path, 'observations.lmdb')
-        env = lmdb.open(obs_lmdb_path, subdir=False, readonly=True, lock=False)
 
-        with env.begin() as txn:
+        with obs_env.begin() as obs_txn:
             for id in range(0, end_frame_id):
                 image_file = os.path.join(video, f"observation.images.rgb.{height}cm_{pitch_1}deg", f"episode_{ep_id:06d}_{id}.jpg")
 
                 # Get image from lmdb
-                image_data = txn.get(image_file.encode('utf-8'))
+                image_data = obs_txn.get(image_file.encode('utf-8'))
                 image = Image.open(io.BytesIO(image_data)).convert('RGB')
 
                 lookdown_image_key = image_file.replace(f'_{pitch_1}deg', f'_{pitch_2}deg')
-                lookdown_image_data = txn.get(lookdown_image_key.encode('utf-8'))
+                lookdown_image_data = obs_txn.get(lookdown_image_key.encode('utf-8'))
                 lookdown_image = Image.open(io.BytesIO(lookdown_image_data)).convert('RGB')
 
                 depth_image_key = image_file.replace(f'_{pitch_1}deg', f'_{pitch_2}deg').replace('rgb', 'depth').replace('.jpg', '.png')
-                depth_image_data = txn.get(depth_image_key.encode('utf-8'))
+                depth_image_data = obs_txn.get(depth_image_key.encode('utf-8'))
                 depth_image = Image.open(io.BytesIO(depth_image_data))
 
                 depth_image, resize_shape = self.preprocess_depth_image_v2(
@@ -1177,13 +1213,18 @@ class NavPixelGoalDataset(Dataset):
                         'from': 'human',
                         'value': f"You are an autonomous navigation assistant. Your task is to <instruction>. \
                         Where should you go next to stay on track? Please output the next waypoint's coordinates in the image. \
-                        Please output STOP when you have successfully completed the task. These are your historical observations: <history>. {random.choice(self.conjunctions)}<image>.",
+                        Please output STOP when you have successfully completed the task. These are your historical observations: <history>. {random.choice(self.conjunctions)}<image>. \
+                        And these are your historical positions: <pose>",
                     }
                 ]
             ]
             chat_sources[0][0]['value'] = (
                 chat_sources[0][0]['value'].replace('<instruction>', instruction).replace('<history>', history_imgs)
             )
+            pose_feats = pose_feats[:start_frame_id + 1]
+
+            if send_only_history_pose:
+                pose_feats = pose_feats[history_id + [start_frame_id]]
         else:
             chat_sources = [
                 [
@@ -1225,6 +1266,7 @@ class NavPixelGoalDataset(Dataset):
             chat_sources,
             self.tokenizer,
             grid_thw_image=grid_thw_merged if grid_thw_merged else None,
+            pose_max_len=len(history_id) + 1 if send_only_history_pose else start_frame_id + 1
         )
 
         position_ids, _ = self.get_rope_index(
@@ -1237,6 +1279,8 @@ class NavPixelGoalDataset(Dataset):
         data_dict["attention_mask"] = [data_dict["input_ids"][0].size(0)]
         data_dict["pixel_values"] = torch.cat(images, dim=0)
         data_dict["image_grid_thw"] = torch.cat([thw.unsqueeze(0) for thw in grid_thws], dim=0)
+        if start_frame_id != 0:
+            data_dict["pose_feats"] = pose_feats
 
         if self.pixel_goal_only:
             goal_len = end_frame_id - start_frame_id - 1
@@ -1457,6 +1501,26 @@ class DataCollatorForSupervisedDataset(object):
 
         return multi_input_ids, multi_labels, t_s_pos
 
+
+    def collate_pose(self, pose_feats: List[torch.Tensor]) -> torch.Tensor:
+        B = len(pose_feats)
+        num_features = torch.tensor([x.shape[-1] for x in pose_feats if x is not None], dtype=torch.long)
+        lengths = torch.tensor([x.shape[0] for x in pose_feats if x is not None], dtype=torch.long)
+        max_length = lengths.max().item()
+
+        padded_pose_feats = []
+        mask = torch.ones((B, max_length), dtype=torch.bool)
+        
+        for i, feat in enumerate(pose_feats):
+            if feat is None:
+                padded_feat = torch.zeros((max_length, num_features[0]))
+            else:
+                pad_length = max_length - feat.shape[0]
+                padded_feat = torch.nn.functional.pad(feat, (0, 0, 0, pad_length), "constant", 0)
+            padded_pose_feats.append(padded_feat)
+            mask[i, lengths[i]:] = 0
+        return torch.stack(padded_pose_feats, dim=0), mask
+
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         input_ids, labels, position_ids = tuple(
             [instance[key] for instance in instances] for key in ("input_ids", "labels", "position_ids")
@@ -1488,6 +1552,8 @@ class DataCollatorForSupervisedDataset(object):
         )
         images = list(instance["pixel_values"] for instance in instances if "pixel_values" in instance)
         videos = list(instance["pixel_values_videos"] for instance in instances if "pixel_values_videos" in instance)
+        pose_feats = list(instance["pose_feats"] for instance in instances if "pose_feats" in instance)
+
         if len(images) != 0:
             concat_images = torch.cat([image for image in images], dim=0)
             grid_thw = [instance["image_grid_thw"] for instance in instances if "image_grid_thw" in instance]
@@ -1504,11 +1570,19 @@ class DataCollatorForSupervisedDataset(object):
             concat_videos = None
             video_grid_thw = None
 
+        if (len(pose_feats) != 0):
+            concat_pose_feats, pose_mask = self.collate_pose(pose_feats)
+        else:
+            concat_pose_feats = None
+            pose_mask = None
+
         batch["pixel_values"] = concat_images
         batch["image_grid_thw"] = grid_thw
         batch["pixel_values_videos"] = concat_videos
         batch["video_grid_thw"] = video_grid_thw
         batch["position_ids"] = position_ids
+        batch["pose_feats"] = concat_pose_feats.to(torch.bfloat16) if concat_pose_feats is not None else None
+        batch["pose_mask"] = pose_mask
 
         if "traj_images" in instances[0]:
             traj_images, traj_depths, traj_poses = tuple(

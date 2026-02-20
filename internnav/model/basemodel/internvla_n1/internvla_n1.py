@@ -14,9 +14,11 @@ from transformers import (
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from .internvla_n1_arch import InternVLAN1MetaForCausalLM, InternVLAN1MetaModel
+from internnav.model.basemodel.traj_encoder.trajectory_encoder import TrajectoryEncoderConfig, TrajectoryTransformerEncoder
 
-TRAJ_TOKEN_INDEX = 151667
+TRAJ_TOKEN_INDEX = 151670
 IMAGE_TOKEN_INDEX = 151655
+POSE_TOKEN_ID = 151666
 _RESNET_MEAN = [0.485, 0.456, 0.406]
 _RESNET_STD = [0.229, 0.224, 0.225]
 
@@ -46,11 +48,27 @@ class InternVLAN1ForCausalLM(Qwen2_5_VLForConditionalGeneration, InternVLAN1Meta
         self.model = InternVLAN1Model(config)
         self.rope_deltas = None
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
         # Initialize weights and apply final processing
         self.post_init()
 
         for name, value in (("_resnet_mean", _RESNET_MEAN), ("_resnet_std", _RESNET_STD)):
             self.register_buffer(name, torch.FloatTensor(value).view(1, 1, 3, 1, 1), persistent=False)
+
+        # TODO Make this modular
+        pose_enc_cfg = TrajectoryEncoderConfig(T_max=256, d_model=512, num_layers=3, nhead=8, use_deltas=False)
+        self.pose_encoder = TrajectoryTransformerEncoder(pose_enc_cfg)
+
+        if any(p.is_meta for p in self.pose_encoder.parameters()):
+            self.pose_encoder = self.pose_encoder.to_empty(device="cuda")
+
+            # IMPORTANT: initialize after to_empty, otherwise garbage values
+            def reinit(m):
+                if hasattr(m, "reset_parameters"):
+                    m.reset_parameters()
+            self.pose_encoder.apply(reinit)
+        else:
+            self.pose_encoder = self.pose_encoder.to("cuda")
 
     def get_model(self):
         return self.model
@@ -79,6 +97,8 @@ class InternVLAN1ForCausalLM(Qwen2_5_VLForConditionalGeneration, InternVLAN1Meta
         traj_depths: Optional[torch.Tensor] = None,
         video_frame_num: Optional[torch.Tensor] = None,
         traj_poses: Optional[torch.Tensor] = None,
+        pose_feats: Optional[torch.Tensor] = None,
+        pose_mask: Optional[torch.Tensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
             labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -118,7 +138,6 @@ class InternVLAN1ForCausalLM(Qwen2_5_VLForConditionalGeneration, InternVLAN1Meta
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "The image shows a street scene with a red stop sign in the foreground. In the background, there is a large red gate with Chinese characters ..."
         ```"""
-
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -162,6 +181,27 @@ class InternVLAN1ForCausalLM(Qwen2_5_VLForConditionalGeneration, InternVLAN1Meta
 
                 video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
                 inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+
+            if pose_feats is not None:
+                # Embed the poses into the input embeddings
+                pose_embeds = self.pose_encoder(pose_feats, pose_mask)
+                pose_embeds = pose_embeds.view(-1, pose_embeds.shape[-1])
+                pose_mask = pose_mask.view(-1)
+                pose_embeds = pose_embeds[pose_mask == 1]  # only keep the valid pose embeddings
+                n_pose_tokens = (input_ids == POSE_TOKEN_ID).sum().item()
+                n_pose_features = pose_embeds.shape[0]
+                if n_pose_tokens != n_pose_features:
+                    raise ValueError(
+                        f"Pose features and pose tokens do not match: tokens: {n_pose_tokens}, features {n_pose_features}"
+                    )
+                mask = input_ids == POSE_TOKEN_ID
+                mask_unsqueezed = mask.unsqueeze(-1)
+                mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
+                p_mask = mask_expanded.to(inputs_embeds.device)
+                
+                pose_embeds = pose_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                inputs_embeds = inputs_embeds.masked_scatter(p_mask, pose_embeds)
+
 
             n_traj_tokens = (input_ids == TRAJ_TOKEN_INDEX).sum().item()
             traj_idx = input_ids == TRAJ_TOKEN_INDEX
